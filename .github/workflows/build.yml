@@ -1,0 +1,217 @@
+name: Build
+
+##
+## Every system GitHub can reach, on every push.
+##
+## A build that links is not a build that works, so each job runs tests/hpcfg_test.py after
+## compiling. It needs Python and nothing else, builds the corpora it uses, and checks the ruleset
+## rather than the exit code, which is what catches a platform that compiles and then counts
+## differently. The four tests that ask another implementation to open a ruleset are skipped here:
+## a runner has no hashcat, no pcfg_cracker and no pcfg-go.
+##
+## The BSDs each boot a virtual machine and install a toolchain into it, which is most of the wall
+## clock of a run. They are here rather than on a schedule because the Makefile treats the family
+## apart - gmake, and -lm where Linux does not need it - and that is exactly the kind of thing that
+## breaks without anyone noticing.
+##
+## Tags are not a trigger. A tag names a commit that was pushed to a branch first and built then, so
+## pushing one would run the whole matrix a second time over the same tree.
+##
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - 'include/**.h'
+      - 'src/**.c'
+      - 'tests/**'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'include/**.h'
+      - 'src/**.c'
+      - 'tests/**'
+      - 'Makefile'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os_name: Linux
+            os_name_lowercase: linux
+          - os: ubuntu-24.04-arm
+            os_name: Linux-ARM64
+            os_name_lowercase: linux-arm64
+          - os: macos-latest
+            os_name: macOS-ARM64
+            os_name_lowercase: macos-arm64
+          - os: macos-15-intel
+            os_name: macOS-x64
+            os_name_lowercase: macos-x64
+          - os: windows-latest
+            os_name: Windows
+            os_name_lowercase: windows
+          - os: freebsd
+            os_name: FreeBSD
+            os_name_lowercase: freebsd
+          - os: openbsd
+            os_name: OpenBSD
+            os_name_lowercase: openbsd
+          - os: netbsd
+            os_name: NetBSD
+            os_name_lowercase: netbsd
+          - os: dragonflybsd
+            os_name: DragonflyBSD
+            os_name_lowercase: dragonflybsd
+
+    name: ${{ matrix.os_name }}
+    runs-on: ${{ (matrix.os == 'freebsd' || matrix.os == 'openbsd' || matrix.os == 'netbsd' || matrix.os == 'dragonflybsd') && 'ubuntu-latest' || matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      ##
+      ## Linux and macOS: the system compiler, the way anyone building from a clone gets it.
+      ##
+
+      - name: Build and test (Linux, macOS)
+        if: startsWith(matrix.os_name_lowercase, 'linux') || startsWith(matrix.os_name_lowercase, 'macos')
+        run: |
+          make info
+          make
+          ./hpcfg --version
+          python3 tests/hpcfg_test.py
+
+      ##
+      ## Windows, native, under MSYS2. The Makefile turns LTO off for this toolchain by itself.
+      ##
+
+      - name: Install MSYS2 (Windows)
+        if: matrix.os_name_lowercase == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: |
+            make
+            mingw-w64-x86_64-toolchain
+            python3
+
+      - name: Build and test (Windows)
+        if: matrix.os_name_lowercase == 'windows'
+        shell: msys2 {0}
+        run: |
+          make info
+          make
+          ./hpcfg.exe --version
+          python3 tests/hpcfg_test.py
+
+      ##
+      ## The BSDs. No CC on the command line: the Makefile picks the compiler per platform, and an
+      ## assignment made here would beat the one it makes.
+      ##
+
+      - name: Build and test (FreeBSD)
+        if: matrix.os_name_lowercase == 'freebsd'
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg update
+            pkg install -y gmake python3
+          run: |
+            gmake info
+            gmake
+            ./hpcfg --version
+            python3 tests/hpcfg_test.py
+
+      - name: Build and test (OpenBSD)
+        if: matrix.os_name_lowercase == 'openbsd'
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg_add gmake python3
+          run: |
+            gmake info
+            gmake
+            ./hpcfg --version
+            python3 tests/hpcfg_test.py
+
+      - name: Build and test (NetBSD)
+        if: matrix.os_name_lowercase == 'netbsd'
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            export PATH="/usr/sbin:$PATH"
+            export PKG_PATH="https://cdn.netbsd.org/pub/pkgsrc/packages/NetBSD/$(uname -m)/$(uname -r)/All"
+            pkg_add pkgin
+            pkgin -y update
+            pkgin -y install gmake python313
+          run: |
+            gmake info
+            gmake
+            ./hpcfg --version
+            python3.13 tests/hpcfg_test.py
+
+      - name: Build and test (DragonflyBSD)
+        if: matrix.os_name_lowercase == 'dragonflybsd'
+        uses: vmactions/dragonflybsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg update
+            pkg install -y gmake python3
+          run: |
+            gmake info
+            gmake
+            ./hpcfg --version
+            python3 tests/hpcfg_test.py
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: hpcfg-${{ matrix.os_name_lowercase }}
+          path: |
+            hpcfg
+            hpcfg.exe
+          if-no-files-found: error
+
+  ##
+  ## The Windows binary that would ship is cross built, so it is built here too. It cannot be run on
+  ## the runner, so what is checked is that it came out a PE32+ and not a host ELF, which is what a
+  ## Makefile asking uname instead of the compiler target would quietly produce.
+  ##
+
+  cross_windows:
+    name: Windows (cross built from Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 file
+
+      - name: Build
+        run: |
+          make info CC=x86_64-w64-mingw32-gcc
+          make CC=x86_64-w64-mingw32-gcc
+          file hpcfg.exe
+          file hpcfg.exe | grep -q "PE32+" || { echo "not a Windows binary"; exit 1; }
+
+      - name: Upload the binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: hpcfg-windows-cross
+          path: hpcfg.exe
+          if-no-files-found: error

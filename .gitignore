@@ -1,0 +1,5 @@
+/hpcfg
+/hpcfg.exe
+obj/*.o
+obj/*.d
+__pycache__/
